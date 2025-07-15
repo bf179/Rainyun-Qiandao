@@ -1,22 +1,16 @@
-# Rainyun-Qiandao
-雨云签到工具 搭配宝塔计划任务可实现每日自动签到~
+# Rainyun-Qiandao-V2 (Selenium)
+**V2版本更新！**
 
+**雨云签到工具 搭配宝塔计划任务可实现每日自动签到~**
+
+众所周知，雨云为了防止白嫖加入了TCaptcha验证码，但主包对JS逆向一窍不通，纯请求的方法便走不通了。
+
+因此只能曲线救国，使用 **Selenium+ddddocr** 来模拟真人操作。
+
+经不严谨测试，目前的方案验证码识别率高达**48.3%**，不过多次重试最终也能通过验证，那么目的达成！
 
 ## 食用方法
-安装[Java](https://www.java.com/zh-CN/download/)作为运行环境后，在<code>命令提示符(CMD)</code>或<code>Bash</code>中运行下列代码。
-
-<code>java -jar Rainyun-Qiandao.jar <用户名> <密码> <最大随机延时(分钟)></code>
-
-## 常见问题
-
-### 1.登录失败？
-**检查你的用户名和密码是否正确。**
-
-### 2.无法连接到服务器？
-**检查网络环境，以及能否正常登录雨云官网。**
-
-### 3.签到失败/请求400状态？
-**等待5分钟后再次重试，如果一直失败，可能官方已对接口加强限制，此程序不再可用。**
-
-### 4.未经处理的异常？
-**尝试发起Issues，我随缘更新=-=**
+1. 安装[Python](https://www.python.org/downloads/)作为运行环境
+2. 配置好本地Selenium环境，**一般情况下你不应该使用跟随此项目上传的chromedriver**，你可以参照[这个视频](https://www.bilibili.com/video/BV1Y9UPYAEqN?p=2)
+3. 第一次运行，需要安装依赖库，在项目目录下运行`python -m pip install -r requirements.txt`即可。
+4. 编辑`rainyun.py`中位于入口函数的设置，保存并执行即可自动化运行签到流程。

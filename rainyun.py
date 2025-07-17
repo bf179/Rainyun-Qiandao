@@ -18,7 +18,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
 
 
-def init_selenium(debug, linux) -> WebDriver:
+def init_selenium() -> WebDriver:
     ops = Options()
     ops.add_argument("--no-sandbox")
     if debug:
@@ -58,7 +58,7 @@ def get_height_from_style(style):
 def process_captcha():
     try:
         download_captcha_img()
-        if check_captcha(ocr):
+        if check_captcha():
             logger.info("开始识别验证码")
             captcha = cv2.imread("temp/captcha.jpg")
             with open("temp/captcha.jpg", 'rb') as f:
@@ -135,7 +135,7 @@ def download_captcha_img():
     download_image(img2_url, "sprite.jpg")
 
 
-def check_captcha(ocr) -> bool:
+def check_captcha() -> bool:
     raw = cv2.imread("temp/sprite.jpg")
     for i in range(3):
         w = raw.shape[1]
@@ -208,7 +208,7 @@ if __name__ == "__main__":
     ocr = ddddocr.DdddOcr(ocr=True, show_ad=False)
     det = ddddocr.DdddOcr(det=True, show_ad=False)
     logger.info("初始化 Selenium")
-    driver = init_selenium(debug, linux)
+    driver = init_selenium()
     # 过 Selenium 检测
     with open("stealth.min.js", mode="r") as f:
         js = f.read()

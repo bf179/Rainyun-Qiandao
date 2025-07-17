@@ -80,39 +80,40 @@ def process_captcha():
                     else:
                         result[similarity_key] = similarity
                         result[position_key] = f"{int((x1 + x2) / 2)},{int((y1 + y2) / 2)}"
-            for i in range(3):
-                similarity_key = f"sprite_{i + 1}.similarity"
-                position_key = f"sprite_{i + 1}.position"
-                positon = result[position_key]
-                logger.info(f"图案 {i + 1} 位于 ({positon})，匹配率：{result[similarity_key]}")
-                slideBg = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="slideBg"]')))
-                style = slideBg.get_attribute("style")
-                x, y = int(positon.split(",")[0]), int(positon.split(",")[1])
-                width_raw, height_raw = captcha.shape[1], captcha.shape[0]
-                width, height = float(get_width_from_style(style)), float(get_height_from_style(style))
-                x_offset, y_offset = float(-width / 2), float(-height / 2)
-                final_x, final_y = int(x_offset + x / width_raw * width), int(y_offset + y / height_raw * height)
-                ActionChains(driver).move_to_element_with_offset(slideBg, final_x, final_y).click().perform()
-            confirm = wait.until(EC.element_to_be_clickable((By.XPATH, '//*[@id="tcStatus"]/div[2]/div[2]/div/div')))
-            logger.info("提交验证码")
-            confirm.click()
-            time.sleep(5)
-            result = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="tcOperation"]')))
-            if result.get_attribute("class") == 'tc-opera pointer show-success':
-                logger.info("验证码通过")
+            if check_answer(result):
+                for i in range(3):
+                    similarity_key = f"sprite_{i + 1}.similarity"
+                    position_key = f"sprite_{i + 1}.position"
+                    positon = result[position_key]
+                    logger.info(f"图案 {i + 1} 位于 ({positon})，匹配率：{result[similarity_key]}")
+                    slideBg = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="slideBg"]')))
+                    style = slideBg.get_attribute("style")
+                    x, y = int(positon.split(",")[0]), int(positon.split(",")[1])
+                    width_raw, height_raw = captcha.shape[1], captcha.shape[0]
+                    width, height = float(get_width_from_style(style)), float(get_height_from_style(style))
+                    x_offset, y_offset = float(-width / 2), float(-height / 2)
+                    final_x, final_y = int(x_offset + x / width_raw * width), int(y_offset + y / height_raw * height)
+                    ActionChains(driver).move_to_element_with_offset(slideBg, final_x, final_y).click().perform()
+                confirm = wait.until(
+                    EC.element_to_be_clickable((By.XPATH, '//*[@id="tcStatus"]/div[2]/div[2]/div/div')))
+                logger.info("提交验证码")
+                confirm.click()
+                time.sleep(5)
+                result = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="tcOperation"]')))
+                if result.get_attribute("class") == 'tc-opera pointer show-success':
+                    logger.info("验证码通过")
+                    return
+                else:
+                    logger.error("验证码未通过，正在重试")
             else:
-                reload = driver.find_element(By.XPATH, '//*[@id="reload"]')
-                logger.error("验证码未通过，正在重试")
-                time.sleep(5)
-                reload.click()
-                time.sleep(5)
-                process_captcha()
+                logger.error("验证码识别失败，正在重试")
         else:
             logger.error("当前验证码识别率低，尝试刷新")
-            reload = driver.find_element(By.XPATH, '//*[@id="reload"]')
-            reload.click()
-            time.sleep(5)
-            process_captcha()
+        reload = driver.find_element(By.XPATH, '//*[@id="reload"]')
+        time.sleep(5)
+        reload.click()
+        time.sleep(5)
+        process_captcha()
     except TimeoutException:
         logger.error("获取验证码图片失败")
 
@@ -145,6 +146,14 @@ def check_captcha(ocr) -> bool:
         if ocr.classification(temp_rb) in ["0", "1"]:
             return False
     return True
+
+
+# 检查是否存在重复坐标，快速判断识别错误
+def check_answer(d: dict) -> bool:
+    flipped = dict()
+    for key in d.keys():
+        flipped[d[key]] = key
+    return len(d.values()) == len(flipped.keys())
 
 
 def compute_similarity(img1_path, img2_path):
@@ -183,8 +192,14 @@ if __name__ == "__main__":
     # [!] 在Windows环境下，带-headless参数会导致异常，应该关闭此项。
     linux = False
 
+    # 以下为代码执行区域，请勿修改！
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
+    ver = "2.1"
+    logger.info("------------------------------------------------------------------")
+    logger.info(f"雨云签到工具 v{ver} by SerendipityR ~")
+    logger.info("Github发布页: https://github.com/SerendipityR-2022/Rainyun-Qiandao")
+    logger.info("------------------------------------------------------------------")
     delay = random.randint(0, max_delay)
     if not debug:
         logger.info(f"随机延时等待 {delay} 分钟")

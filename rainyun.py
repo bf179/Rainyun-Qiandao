@@ -189,7 +189,7 @@ if __name__ == "__main__":
     # 密码
     pwd = "12345678"
     # 调试模式
-    debug = True
+    debug = False
     # Linux 模式
     # [!] 在Windows环境下，带-headless参数会导致异常，应该关闭此项。
     linux = False

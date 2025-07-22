@@ -180,6 +180,8 @@ def compute_similarity(img1_path, img2_path):
 
 
 if __name__ == "__main__":
+    # 连接超时等待
+    timeout = 15
     # 最大随机等待延时
     max_delay = 90
     # 用户名
@@ -187,7 +189,7 @@ if __name__ == "__main__":
     # 密码
     pwd = "12345678"
     # 调试模式
-    debug = False
+    debug = True
     # Linux 模式
     # [!] 在Windows环境下，带-headless参数会导致异常，应该关闭此项。
     linux = False
@@ -195,15 +197,16 @@ if __name__ == "__main__":
     # 以下为代码执行区域，请勿修改！
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
-    ver = "2.1"
+    ver = "2.1b"
     logger.info("------------------------------------------------------------------")
     logger.info(f"雨云签到工具 v{ver} by SerendipityR ~")
     logger.info("Github发布页: https://github.com/SerendipityR-2022/Rainyun-Qiandao")
     logger.info("------------------------------------------------------------------")
     delay = random.randint(0, max_delay)
+    delay_sec = random.randint(0, 60)
     if not debug:
-        logger.info(f"随机延时等待 {delay} 分钟")
-        time.sleep(delay * 60)
+        logger.info(f"随机延时等待 {delay} 分钟 {delay_sec} 秒")
+        time.sleep(delay * 60 + delay_sec)
     logger.info("初始化 ddddocr")
     ocr = ddddocr.DdddOcr(ocr=True, show_ad=False)
     det = ddddocr.DdddOcr(det=True, show_ad=False)
@@ -224,7 +227,7 @@ if __name__ == "__main__":
     username.send_keys(user)
     password.send_keys(pwd)
     login_button.click()
-    wait = WebDriverWait(driver, 5)
+    wait = WebDriverWait(driver, timeout)
     try:
         login_captcha = wait.until(EC.visibility_of_element_located((By.ID, 'tcaptcha_iframe_dy')))
         logger.warning("触发验证码！")

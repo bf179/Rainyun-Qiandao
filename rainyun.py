@@ -197,7 +197,7 @@ if __name__ == "__main__":
     # 以下为代码执行区域，请勿修改！
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
-    ver = "2.1b"
+    ver = "2.1c"
     logger.info("------------------------------------------------------------------")
     logger.info(f"雨云签到工具 v{ver} by SerendipityR ~")
     logger.info("Github发布页: https://github.com/SerendipityR-2022/Rainyun-Qiandao")

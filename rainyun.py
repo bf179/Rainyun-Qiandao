@@ -170,7 +170,7 @@ def compute_similarity(img1_path, img2_path):
     bf = cv2.BFMatcher()
     matches = bf.knnMatch(des1, des2, k=2)
 
-    good = [m for m, n in matches if m.distance < 0.8 * n.distance]
+    good = [m for m_n in matches if len(m_n) == 2 for m, n in [m_n] if m.distance < 0.8 * n.distance]
 
     if len(good) == 0:
         return 0.0, 0
@@ -197,7 +197,7 @@ if __name__ == "__main__":
     # 以下为代码执行区域，请勿修改！
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
-    ver = "2.1c"
+    ver = "2.2"
     logger.info("------------------------------------------------------------------")
     logger.info(f"雨云签到工具 v{ver} by SerendipityR ~")
     logger.info("Github发布页: https://github.com/SerendipityR-2022/Rainyun-Qiandao")

@@ -17,8 +17,8 @@
 1. ✅ Docker 一键部署 —— 提供 `Dockerfile` 与 `docker-compose`，开箱即用，无需配置环境
 2. ✅ GitHub Actions —— 支持利用 GitHub Actions 免费资源进行每日自动签到，无需服务器
 3. ✅ 宝塔面板 (BT Panel) / Linux 特殊虚拟主机运行 —— 提供 `script/run_bt.sh` 脚本，无需配置环境
-4. ✅ 多账号支持 —— 支持单容器配置无限个账号（使用 `|` 分隔），各账号随机浏览器指纹，并发执行
-5. ✅ 多通道通知 —— 集成 PushPlus、WXPusher、钉钉、邮件等多种通知方式
+4. ✅ 多账号支持 —— 支持配置无限个账号并发签到（使用 `|` 分隔），各账号随机浏览器指纹，并发执行
+5. ✅ 多通道通知 —— 支持 PushPlus、WXPusher、钉钉、邮件等多种通知方式
 6. ✅ 代理 IP 池 —— 支持配置 HTTP 代理，防止因 IP 封锁导致的签到失败
 7. ✅ 智能截图 —— 签到成功/失败自动截图并压缩上传，不仅有图有真相，还节省流量
 
@@ -45,6 +45,61 @@ cp .env.example .env
 ```
 
 编辑 `.env` 文件，根据里面的提示填入你的雨云账号和密码，多个账号/密码之间请使用竖线 | 分隔
+
+<details>
+<summary>📋 <b>完整参数列表（点击展开）</b></summary>
+
+#### 🔐 雨云登录凭据（必填）
+
+| 变量名 | 说明 | 示例 |
+|--------|------|------|
+| `RAINYUN_USERNAME` | 雨云账号，多账号用 `\|` 分隔 | `user1@qq.com\|user2@163.com` |
+| `RAINYUN_PASSWORD` | 对应密码，多账号用 `\|` 分隔 | `pass1\|pass2` |
+
+#### 📢 通知渠道配置（可选，至少配一个才能收到推送）
+
+| 变量名 | 说明 | 备注 |
+|--------|------|------|
+| `PUSHPLUS_TOKEN` | [PushPlus](http://www.pushplus.plus/) Token | 实名用户 2 万字 / 会员 10 万字 |
+| `WXPUSHER_APP_TOKEN` | [WXPusher](http://wxpusher.zjiecode.com/admin/) App Token | 限制 4 万字 |
+| `WXPUSHER_UIDS` | WXPusher 接收者 UID，多个用 `,` 分隔 | 个人标识 |
+| `WXPUSHER_TOPIC_IDS` | WXPusher 主题 ID，多个用 `,` 分隔 | 群发标识 |
+| `DINGTALK_ACCESS_TOKEN` | 钉钉机器人 Access Token | 限制约 2 万字 |
+| `DINGTALK_SECRET` | 钉钉机器人加签密钥 | 可选 |
+| `SMTP_HOST` | SMTP 服务器地址 | 如 `smtp.qq.com` |
+| `SMTP_PORT` | SMTP 端口 | `465`(SSL) 或 `587`(TLS) |
+| `SMTP_USER` | SMTP 登录用户名 | |
+| `SMTP_PASS` | SMTP 授权码 | 不是登录密码 |
+| `SMTP_TO` | 收件人邮箱 | 不填则默认发给第一个签到账号 |
+
+> **关于推送内容超长**：当推送内容超过渠道字符限制时，程序会自动降级：完整报告 → 无截图报告 → 精简摘要，**无需手动处理**。PushPlus 还会先按 10 万字（会员）尝试，失败后自动降级到 2 万字（实名）重试。
+
+#### ⚙️ 运行参数（可选）
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `SCHEDULE_TIME` | 定时执行时间（仅 schedule 模式） | `08:00` |
+| `DEBUG` | 开启调试日志 | `false` |
+| `MAX_DELAY` | 多账号错峰启动最大随机延时（秒） | `15` |
+| `MAX_WORKERS` | 最大并发线程数 | `3` |
+| `TIMEOUT` | 请求超时时间（毫秒） | `30000` |
+| `CHECKIN_MAX_RETRIES` | 签到失败最大重试次数 | `2` |
+
+#### 🌐 代理 IP（可选）
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `PROXY_API_URL` | 代理 IP 接口地址 | 不填则不使用代理 |
+
+#### 📸 截图与压缩（可选）
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `SCREENSHOT_MODE` | 截图嵌入策略：`all` 全部 / `failed_only` 仅失败 / `none` 无截图 | `failed_only` |
+| `TINYPNG_API_KEY` | [TinyPNG](https://tinypng.com/developers) API Key（每月免费 500 次） | 不填则本地压缩 |
+
+</details>
+
 
 ### 3. 启动服务（选择一种模式）
 
@@ -217,6 +272,18 @@ http://192.168.1.1:8080
 - 关闭无图模式
 - 调整Action默认执行时间
 
+### 2026-03-30
+- CI环境下隐藏积分信息
+- 修复通知内容超长被截断问题，自动降级报告格式
+- 增加截图嵌入策略配置（all / failed_only / none）
+
 ## 致谢
 
 本项目基于 [Rainyun-Qiandao](https://github.com/SerendipityR-2022/Rainyun-Qiandao) 开发，感谢原作者的开源贡献。
+
+> [!NOTE]
+> **免责声明与致谢**
+> 
+> - ⚠️ 本项目仅供技术交流与学习参考，请严格遵守相关法律法规，切勿将其用于任何商业或非法用途。
+> - 🚫 将本项目分享到任何雨云官方相关讨论社区/群组是极其不明智的行为，请不要这么做！
+> - 💡 开源不易，在您进行分发、搬运或二次开源时，请务必保留原项目出处及致谢信息，感谢您的理解与尊重！

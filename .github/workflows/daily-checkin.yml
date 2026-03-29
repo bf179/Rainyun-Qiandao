@@ -66,6 +66,7 @@ jobs:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           WXPUSHER_APP_TOKEN: ${{ secrets.WXPUSHER_APP_TOKEN }}
           WXPUSHER_UIDS: ${{ secrets.WXPUSHER_UIDS }}
+          WXPUSHER_TOPIC_IDS: ${{ secrets.WXPUSHER_TOPIC_IDS }}
           DINGTALK_ACCESS_TOKEN: ${{ secrets.DINGTALK_ACCESS_TOKEN }}
           DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
@@ -79,6 +80,8 @@ jobs:
           MAX_DELAY: '1'
           TIMEOUT: '60000'
           CHECKIN_MAX_RETRIES: '3'
+          # 截图嵌入策略 (all / failed_only / none)
+          SCREENSHOT_MODE: ${{ secrets.SCREENSHOT_MODE || 'failed_only' }}
         run: |
           python rainyun.py
 

@@ -112,23 +112,89 @@ def setup_logging():
 
 class NotificationProvider:
     """通知提供者基类"""
+    MAX_BYTES = 0          # 0 = 无限制，子类覆盖
+    CONTENT_KEYS = []      # 降级优先级，子类覆盖
+
     def send(self, title, context):
         """
         发送通知
         :param title: 标题
-        :param context: 内容上下文，包含 {'html': str, 'markdown': str}
+        :param context: 内容上下文，包含多级内容版本
         """
         raise NotImplementedError
 
+    def select_content(self, context, max_bytes_override=None):
+        """
+        按降级链选择不超限的内容版本
+        :param context: 包含多级内容的字典
+        :param max_bytes_override: 覆盖默认的 MAX_BYTES 限制
+        :return: 选中的内容字符串
+        """
+        limit = max_bytes_override if max_bytes_override is not None else self.MAX_BYTES
+
+        for key in self.CONTENT_KEYS:
+            content = context.get(key, '')
+            if not content:
+                continue
+            byte_size = len(content.encode('utf-8'))
+            if limit == 0 or byte_size <= limit:
+                if key != self.CONTENT_KEYS[0]:
+                    logging.info(f"{self.__class__.__name__}: 内容降级到 {key} ({byte_size} bytes)")
+                return content
+
+        # 全部超限：用最后一个（summary）并安全截断
+        last_key = self.CONTENT_KEYS[-1] if self.CONTENT_KEYS else ''
+        last_content = context.get(last_key, '')
+        if last_content and limit > 0:
+            logging.warning(f"{self.__class__.__name__}: 所有内容版本均超限，执行安全截断")
+            return self._safe_truncate(last_content, limit)
+        return last_content
+
+    @staticmethod
+    def _safe_truncate(content, max_bytes):
+        """
+        安全截断内容，避免截坏 UTF-8 多字节字符
+        :param content: 要截断的字符串
+        :param max_bytes: 最大字节数
+        :return: 截断后的字符串
+        """
+        encoded = content.encode('utf-8')
+        if len(encoded) <= max_bytes:
+            return content
+        # 预留空间给截断提示
+        suffix = '\n\n... [内容已截断]'
+        suffix_bytes = len(suffix.encode('utf-8'))
+        truncated = encoded[:max_bytes - suffix_bytes]
+        # 确保不截断在 UTF-8 多字节字符中间
+        return truncated.decode('utf-8', errors='ignore') + suffix
+
 class PushPlusProvider(NotificationProvider):
     """PushPlus 推送渠道"""
+    MAX_BYTES = 90_000     # 10 万字会员限额（预留 10% 安全余量）
+    FALLBACK_MAX_BYTES = 18_000  # 2 万字实名限额（预留 10% 安全余量）
+    CONTENT_KEYS = ['html_full', 'html_lite', 'summary_html']
+
     def __init__(self, token):
         self.token = token
 
     def send(self, title, context):
         import requests
-        content = context.get('html', '')
         url = 'http://www.pushplus.plus/send'
+
+        # 第一轮：按会员限额（10 万字）选择内容
+        content = self.select_content(context)
+        success = self._do_send(requests, url, title, content)
+
+        if not success:
+            # 第二轮：降级到实名限额（2 万字）重试
+            logging.info("PushPlus: 推送失败，降级到实名用户限额 (2万字) 重试")
+            content = self.select_content(context, max_bytes_override=self.FALLBACK_MAX_BYTES)
+            success = self._do_send(requests, url, title, content)
+
+        return success
+
+    def _do_send(self, requests, url, title, content):
+        """执行实际的推送请求"""
         data = {
             "token": self.token,
             "title": title,
@@ -136,7 +202,7 @@ class PushPlusProvider(NotificationProvider):
             "template": "html"
         }
         try:
-            logging.info(f"Sending PushPlus notification: {title}")
+            logging.info(f"Sending PushPlus notification: {title} ({len(content.encode('utf-8'))} bytes)")
             response = requests.post(url, json=data, timeout=10)
             result = response.json()
             if result.get('code') == 200:
@@ -151,23 +217,41 @@ class PushPlusProvider(NotificationProvider):
 
 class WXPusherProvider(NotificationProvider):
     """WXPusher 推送渠道"""
-    def __init__(self, app_token, uids):
+    MAX_BYTES = 36_000     # 4 万字限额（预留 10% 安全余量）
+    CONTENT_KEYS = ['html_full', 'html_lite', 'summary_html']
+
+    def __init__(self, app_token, uids=None, topic_ids=None):
         self.app_token = app_token
-        self.uids = uids if isinstance(uids, list) else [uid.strip() for uid in uids.split(',') if uid.strip()]
+        # 处理 UIDs
+        if uids:
+            self.uids = uids if isinstance(uids, list) else [uid.strip() for uid in str(uids).split(',') if uid.strip()]
+        else:
+            self.uids = []
+            
+        # 处理 Topic IDs
+        if topic_ids:
+            self.topic_ids = topic_ids if isinstance(topic_ids, list) else [tid.strip() for tid in str(topic_ids).split(',') if tid.strip()]
+        else:
+            self.topic_ids = []
 
     def send(self, title, context):
         import requests
-        content = context.get('html', '')
+        content = self.select_content(context)
         url = 'https://wxpusher.zjiecode.com/api/send/message'
         data = {
             "appToken": self.app_token,
             "content": content,
             "summary": title,
             "contentType": 2,  # 1=Text, 2=HTML
-            "uids": self.uids
+            "uids": self.uids,
+            "topicIds": self.topic_ids
         }
         try:
-            logging.info(f"Sending WXPusher notification: {title}")
+            target_desc = f"UIDs: {len(self.uids)}" if self.uids else ""
+            if self.topic_ids:
+                target_desc += (" & " if target_desc else "") + f"Topics: {len(self.topic_ids)}"
+                
+            logging.info(f"Sending WXPusher notification to {target_desc}: {title} ({len(content.encode('utf-8'))} bytes)")
             response = requests.post(url, json=data, timeout=10)
             result = response.json()
             if result.get('code') == 1000: # WXPusher success code is 1000
@@ -182,6 +266,9 @@ class WXPusherProvider(NotificationProvider):
 
 class DingTalkProvider(NotificationProvider):
     """钉钉机器人推送渠道"""
+    MAX_BYTES = 18_000     # ~2 万字限额（预留 10% 安全余量）
+    CONTENT_KEYS = ['markdown_full', 'markdown_lite', 'summary_markdown']
+
     def __init__(self, access_token, secret=None):
         self.access_token = access_token
         self.secret = secret
@@ -194,7 +281,7 @@ class DingTalkProvider(NotificationProvider):
         import base64
         import urllib.parse
         
-        content = context.get('markdown', '')
+        content = self.select_content(context)
         # 钉钉 Markdown 需要 title 字段
         # content 必须包含 title，这里组合一下
         md_text = f"# {title}\n\n{content}"
@@ -221,7 +308,7 @@ class DingTalkProvider(NotificationProvider):
         }
         
         try:
-            logging.info(f"Sending DingTalk notification: {title}")
+            logging.info(f"Sending DingTalk notification: {title} ({len(md_text.encode('utf-8'))} bytes)")
             response = requests.post(url, params=params, json=data, timeout=10)
             result = response.json()
             if result.get('errcode') == 0:
@@ -236,6 +323,9 @@ class DingTalkProvider(NotificationProvider):
 
 class EmailProvider(NotificationProvider):
     """邮件推送渠道"""
+    MAX_BYTES = 0  # 无限制
+    CONTENT_KEYS = ['html_email', 'html_full']
+
     def __init__(self, host, port, user, password, to_email):
         self.host = host
         self.port = int(port)
@@ -249,7 +339,7 @@ class EmailProvider(NotificationProvider):
         from email.mime.multipart import MIMEMultipart
         from email.header import Header
         
-        content = context.get('html', '')
+        content = self.select_content(context)
         
         try:
             message = MIMEMultipart()
@@ -877,8 +967,12 @@ def get_screenshot_html(screenshot_path):
 
 
 
-def generate_html_report(results):
-    """生成 HTML 签到报告"""
+def generate_html_report(results, screenshot_mode='all'):
+    """
+    生成 HTML 签到报告
+    :param results: 签到结果列表
+    :param screenshot_mode: 截图模式 - 'all'(所有), 'failed_only'(仅失败), 'none'(无截图)
+    """
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     success_count = len([r for r in results if r['status']])
     total_count = len(results)
@@ -999,7 +1093,7 @@ def generate_html_report(results):
                     <span>重试: {res.get('retries', 0)}</span>
                 </div>
             </div>
-            {get_screenshot_html(res.get('screenshot'))}
+            {get_screenshot_html(res.get('screenshot')) if screenshot_mode == 'all' or (screenshot_mode == 'failed_only' and not res['status']) else ''}
         </div>
         """
         
@@ -1013,8 +1107,12 @@ def generate_html_report(results):
     return html
 
 
-def generate_markdown_report(results):
-    """生成 Markdown 签到报告"""
+def generate_markdown_report(results, compact=False):
+    """
+    生成 Markdown 签到报告
+    :param results: 签到结果列表
+    :param compact: 精简模式 - 成功账号只保留一行，失败账号保留完整信息
+    """
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     success_count = len([r for r in results if r['status']])
     total_count = len(results)
@@ -1025,21 +1123,87 @@ def generate_markdown_report(results):
     
     for res in results:
         status_icon = "✅" if res['status'] else "❌"
-        md += f"### {status_icon} {res['username']}\n"
         
-        if res.get('points'):
-            points = res['points']
-            money = points / 2000
-            md += f"- **积分**: {points} (≈￥{money:.2f})\n"
-        
-        md += f"- **消息**: {res['msg']}\n"
-        if res.get('retries', 0) > 0:
-            md += f"- **重试**: {res['retries']}\n"
-        md += "\n"
+        if compact and res['status']:
+            # 精简模式：成功账号一行搞定
+            points_str = f" | {res['points']}积分" if res.get('points') else ""
+            md += f"- {status_icon} {res['username']}{points_str}\n"
+        else:
+            # 完整模式 或 失败账号
+            md += f"### {status_icon} {res['username']}\n"
+            
+            if res.get('points'):
+                points = res['points']
+                money = points / 2000
+                md += f"- **积分**: {points} (≈￥{money:.2f})\n"
+            
+            md += f"- **消息**: {res['msg']}\n"
+            if res.get('retries', 0) > 0:
+                md += f"- **重试**: {res['retries']}\n"
+            md += "\n"
         
     md += "---\n"
     md += "Powered by Rainyun-Qiandao"
     return md
+
+
+def generate_summary_report(results, fmt='html'):
+    """
+    生成极精简的摘要报告（兜底版本）
+    :param results: 签到结果列表
+    :param fmt: 'html' 或 'markdown'
+    :return: 摘要内容字符串
+    """
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    success_count = len([r for r in results if r['status']])
+    fail_count = len(results) - success_count
+    total_count = len(results)
+    
+    if fmt == 'html':
+        lines = []
+        lines.append(f'<div style="font-family: sans-serif; padding: 16px;">')
+        lines.append(f'<h3>🌧️ 雨云签到摘要</h3>')
+        lines.append(f'<p style="color: #6b7280; font-size: 13px;">{now_str}</p>')
+        lines.append(f'<p><b>✅ 成功: {success_count}</b> / <b>❌ 失败: {fail_count}</b> / 共 {total_count}</p>')
+        lines.append('<hr>')
+        
+        for res in results:
+            icon = '✅' if res['status'] else '❌'
+            detail = ''
+            if res['status'] and res.get('points'):
+                detail = f" — {res['points']}积分"
+            elif not res['status']:
+                detail = f" — {res['msg']}"
+                if res.get('retries', 0) > 0:
+                    detail += f" (重试{res['retries']}次)"
+            lines.append(f'<p>{icon} {res["username"]}{detail}</p>')
+        
+        lines.append('<hr>')
+        lines.append('<p style="font-size: 12px; color: #9ca3af;">Powered by Rainyun-Qiandao</p>')
+        lines.append('</div>')
+        return '\n'.join(lines)
+    else:
+        # Markdown 格式
+        lines = []
+        lines.append(f'> {now_str}')
+        lines.append(f'')
+        lines.append(f'**✅ 成功: {success_count}** / **❌ 失败: {fail_count}** / 共 {total_count}')
+        lines.append('---')
+        
+        for res in results:
+            icon = '✅' if res['status'] else '❌'
+            detail = ''
+            if res['status'] and res.get('points'):
+                detail = f" — {res['points']}积分"
+            elif not res['status']:
+                detail = f" — {res['msg']}"
+                if res.get('retries', 0) > 0:
+                    detail += f" (重试{res['retries']}次)"
+            lines.append(f'- {icon} {res["username"]}{detail}')
+        
+        lines.append('---')
+        lines.append('Powered by Rainyun-Qiandao')
+        return '\n'.join(lines)
 
 
 def send_pushplus_notification(token, title, content):
@@ -1128,7 +1292,7 @@ def save_screenshot(driver, account_id, status="success", error_msg=""):
         return None
 
 
-def compress_screenshot(input_path, output_path, max_width=1280, quality=75):
+def compress_screenshot(input_path, output_path, max_width=800, quality=35):
     """先本地 Pillow 压缩，如果配置了 TinyPNG 则二次压缩"""
     result = compress_with_pillow(input_path, output_path, max_width, quality)
     if not result:
@@ -1378,9 +1542,10 @@ def run_all_accounts():
         # 注册 WXPusher
         wx_app_token = os.getenv("WXPUSHER_APP_TOKEN")
         wx_uids = os.getenv("WXPUSHER_UIDS")
-        if wx_app_token and wx_uids:
+        wx_topics = os.getenv("WXPUSHER_TOPIC_IDS")
+        if wx_app_token and (wx_uids or wx_topics):
             logger.info("Configuring WXPusher provider...")
-            notification_manager.add_provider(WXPusherProvider(wx_app_token, wx_uids))
+            notification_manager.add_provider(WXPusherProvider(wx_app_token, wx_uids, wx_topics))
             
         # 注册 DingTalk
         dingtalk_token = os.getenv("DINGTALK_ACCESS_TOKEN")
@@ -1411,13 +1576,29 @@ def run_all_accounts():
         # 发送通知
         if notification_manager.providers:
             logger.info("正在生成详细推送报告...")
-            html_content = generate_html_report(final_results)
-            markdown_content = generate_markdown_report(final_results)
             
+            # 从环境变量读取截图策略：all(所有账号) / failed_only(仅失败) / none(不带截图)
+            screenshot_mode = os.getenv("SCREENSHOT_MODE", "failed_only").strip().lower()
+            if screenshot_mode not in ('all', 'failed_only', 'none'):
+                logger.warning(f"无效的 SCREENSHOT_MODE '{screenshot_mode}'，使用默认值 'failed_only'")
+                screenshot_mode = 'failed_only'
+            logger.info(f"截图策略: {screenshot_mode}")
+            
+            # 一次性生成 7 份内容，由各 Provider 按自身限制自动选择
             context = {
-                'html': html_content,
-                'markdown': markdown_content
+                'html_email':        generate_html_report(final_results, screenshot_mode='all'), # 邮件无限制，强制全带截图
+                'html_full':         generate_html_report(final_results, screenshot_mode=screenshot_mode),
+                'html_lite':         generate_html_report(final_results, screenshot_mode='none'),
+                'markdown_full':     generate_markdown_report(final_results, compact=False),
+                'markdown_lite':     generate_markdown_report(final_results, compact=True),
+                'summary_html':      generate_summary_report(final_results, fmt='html'),
+                'summary_markdown':  generate_summary_report(final_results, fmt='markdown'),
             }
+            
+            # 记录各版本大小，便于调试
+            for key, content in context.items():
+                byte_size = len(content.encode('utf-8'))
+                logger.info(f"内容版本 {key}: {byte_size} bytes ({byte_size/1024:.1f} KB)")
             
             title = f"雨云签到: {success_count}/{len(accounts)} 成功"
             notification_manager.send_all(title, context)
@@ -2036,7 +2217,8 @@ def run_checkin(account_user=None, account_pwd=None):
             "textContent")
         import re
         current_points = int(''.join(re.findall(r'\d+', points_raw)))
-        logger_adapter.info(f"当前剩余积分: {current_points} | 约为 {current_points / 2000:.2f} 元")
+        if not os.getenv('CI'):
+            logger_adapter.info(f"当前剩余积分: {current_points} | 约为 {current_points / 2000:.2f} 元")
         logger_adapter.info("签到任务执行成功！")
         # 保存成功截图
         screenshot_path = save_screenshot(driver, current_user, status="success")
@@ -2179,10 +2361,14 @@ if __name__ == "__main__":
     # 初始化日志（使用新的日志轮转功能）
     logger = setup_logging()
     ver = "2.2-docker-notify-pp"
-    logger.info("------------------------------------------------------------------")
-    logger.info(f"雨云签到工具 v{ver} by LeapYa ~")
-    logger.info("Github发布页: https://github.com/LeapYa/Rainyun-Qiandao")
-    logger.info("------------------------------------------------------------------")
+    logger.info("===================================================================")
+    logger.info(f"🌧️ Rainyun-Qiandao v{ver} (Selenium)")
+    logger.info("👨‍💻 Based on original project by: SerendipityR-2022")
+    logger.info("🚀 Maintained & Extended by: LeapYa")
+    logger.info("🔗 GitHub: https://github.com/LeapYa/Rainyun-Qiandao")
+    logger.info("💡 开源不易，感谢原作者。请二、三次修改者能够保留源出处，谢谢！")
+    logger.info("===================================================================")
+    print("")
     logger.info("已启用日志轮转功能，将自动清理7天前的日志")
     if debug:
         logger.info(f"当前配置: MAX_DELAY={max_delay}分钟, TIMEOUT={timeout}秒")

@@ -36,6 +36,7 @@ services:
       # Push Message (WXPusher)
       - WXPUSHER_APP_TOKEN=${WXPUSHER_APP_TOKEN}
       - WXPUSHER_UIDS=${WXPUSHER_UIDS}
+      - WXPUSHER_TOPIC_IDS=${WXPUSHER_TOPIC_IDS}
       # Push Message (DingTalk)
       - DINGTALK_ACCESS_TOKEN=${DINGTALK_ACCESS_TOKEN}
       - DINGTALK_SECRET=${DINGTALK_SECRET}
@@ -54,6 +55,8 @@ services:
       # Python环境配置
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Shanghai
+      # 截图嵌入策略 (all / failed_only / none)
+      - SCREENSHOT_MODE=${SCREENSHOT_MODE:-failed_only}
     volumes:
       # 挂载临时目录（用于验证码图片）
       - ./temp:/app/temp
@@ -87,6 +90,7 @@ services:
       # Push Message (WXPusher)
       - WXPUSHER_APP_TOKEN=${WXPUSHER_APP_TOKEN}
       - WXPUSHER_UIDS=${WXPUSHER_UIDS}
+      - WXPUSHER_TOPIC_IDS=${WXPUSHER_TOPIC_IDS}
       # Push Message (DingTalk)
       - DINGTALK_ACCESS_TOKEN=${DINGTALK_ACCESS_TOKEN}
       - DINGTALK_SECRET=${DINGTALK_SECRET}
@@ -106,6 +110,8 @@ services:
       # Python环境配置
       - PYTHONUNBUFFERED=1
       - TZ=Asia/Shanghai
+      # 截图嵌入策略 (all / failed_only / none)
+      - SCREENSHOT_MODE=${SCREENSHOT_MODE:-failed_only}
     volumes:
       # 挂载日志目录（用于日志轮转和持久化）
       - ./logs:/app/logs

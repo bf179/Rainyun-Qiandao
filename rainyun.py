@@ -8,6 +8,8 @@ import sys
 import threading
 from datetime import datetime, timedelta
 
+logger = logging.getLogger(__name__)
+
 # 全局变量，用于存储Selenium模块
 selenium_modules = None
 
@@ -1816,15 +1818,23 @@ class TencentCaptchaProvider(CaptchaProvider):
             # --- 阶段 1: 基于目标检测 + OCR/SIFT 的全局分配 ---
             best_assignment = None
             best_total_score = -1.0
+            sprite_profiles = []
             
             if len(spec_infos) >= 3:
                 import itertools
                 score_matrix = []
                 for j in range(3):
                     sprite_path = f"temp/sprite_{j + 1}.jpg"
+                    sprite_profile = self._build_sprite_profile(sprite_path, ocr)
+                    sprite_profiles.append(sprite_profile)
                     sprite_scores = []
                     for k, spec in enumerate(spec_infos):
-                        score, is_semantic = self._compute_score(sprite_path, spec["path"], ocr)
+                        score, is_semantic = self._compute_score(
+                            sprite_path,
+                            spec["path"],
+                            ocr,
+                            sprite_profile=sprite_profile,
+                        )
                         sprite_scores.append(score)
                         logger_adapter.debug(f"目标 {j + 1} -> 候选 {k + 1}: 得分 {score:.2f} (语义匹配: {is_semantic})")
                     score_matrix.append(sprite_scores)
@@ -1839,33 +1849,56 @@ class TencentCaptchaProvider(CaptchaProvider):
             MIN_ACCEPTABLE_TOTAL_SCORE = 2.0
             final_click_positions = []
             use_fallback = False
+            assigned_scores = []
             
             if best_assignment is not None and best_total_score >= MIN_ACCEPTABLE_TOTAL_SCORE:
-                logger_adapter.info(f"成功找到全局最优组合，验证码一阶段置信分: {best_total_score:.2f}")
-                for j in range(3):
-                    sprite_path = f"temp/sprite_{j + 1}.jpg"
-                    spec_idx = best_assignment[j]
-                    spec_info = spec_infos[spec_idx]
-                    positon = spec_info["pos"]
-                    score = score_matrix[j][spec_idx]
-                    refined_pos, refined_score = self._find_sprite_by_template(
-                        sprite_path,
-                        "temp/captcha.jpg",
-                        search_box=spec_info["bbox"],
-                        padding=12,
+                assigned_scores = [score_matrix[j][best_assignment[j]] for j in range(3)]
+                min_assigned_score = min(assigned_scores)
+                glyph_low_confidence = False
+                if sprite_profiles:
+                    for j, score in enumerate(assigned_scores):
+                        profile = sprite_profiles[j] if j < len(sprite_profiles) else None
+                        if profile and profile.get("is_glyph") and score < 4.0:
+                            glyph_low_confidence = True
+                            logger_adapter.warning(
+                                f"图案 {j + 1} 被识别为字形，但局部候选最高分仅 {score:.2f}，"
+                                "怀疑正确字符未被候选框截到，降级使用全图搜索..."
+                            )
+                            break
+
+                if min_assigned_score <= 0 or glyph_low_confidence:
+                    logger_adapter.warning(
+                        f"一阶段存在低可信目标（最低单项得分 {min_assigned_score:.2f}），"
+                        "放弃直接提交，降级使用全图边缘模板匹配..."
                     )
-                    if refined_pos:
-                        positon = refined_pos
-                        logger_adapter.info(
-                            f"--> 图案 {j + 1} 选择候选框 {spec_idx + 1}，候选框中心 ({spec_info['pos']}) -> "
-                            f"局部精修坐标 ({positon})，单项得分：{score:.2f}，精修边缘分：{refined_score:.2f}"
+                    use_fallback = True
+                else:
+                    logger_adapter.info(f"成功找到全局最优组合，验证码一阶段置信分: {best_total_score:.2f}")
+                    for j in range(3):
+                        sprite_path = f"temp/sprite_{j + 1}.jpg"
+                        spec_idx = best_assignment[j]
+                        spec_info = spec_infos[spec_idx]
+                        positon = spec_info["pos"]
+                        score = score_matrix[j][spec_idx]
+                        refined_pos, refined_score = self._find_sprite_by_template(
+                            sprite_path,
+                            "temp/captcha.jpg",
+                            search_box=spec_info["bbox"],
+                            padding=12,
+                            target_profile=sprite_profiles[j] if j < len(sprite_profiles) else None,
                         )
-                    else:
-                        logger_adapter.info(
-                            f"--> 图案 {j + 1} 选择候选框 {spec_idx + 1} 位于 ({positon})，"
-                            f"单项得分：{score:.2f}，局部精修失败，回退候选框中心"
-                        )
-                    final_click_positions.append(positon)
+                        if refined_pos:
+                            positon = refined_pos
+                            logger_adapter.info(
+                                f"--> 图案 {j + 1} 选择候选框 {spec_idx + 1}，候选框中心 ({spec_info['pos']}) -> "
+                                f"局部精修坐标 ({positon})，单项得分：{score:.2f}，精修边缘分：{refined_score:.2f}"
+                            )
+                        else:
+                            logger_adapter.info(
+                                f"--> 图案 {j + 1} 选择候选框 {spec_idx + 1} 位于 ({positon})，"
+                                f"单项得分：{score:.2f}，局部精修失败，回退候选框中心"
+                            )
+                        final_click_positions.append(positon)
             else:
                 score_info = f"{best_total_score:.2f}" if best_assignment is not None else "候选框不足3个"
                 logger_adapter.warning(f"局部目标检测不佳（得分 {score_info} < {MIN_ACCEPTABLE_TOTAL_SCORE}），降级使用全图边缘模板匹配...")
@@ -1881,6 +1914,7 @@ class TencentCaptchaProvider(CaptchaProvider):
                         "temp/captcha.jpg",
                         top_k=5,
                         min_distance=24,
+                        target_profile=sprite_profiles[j] if j < len(sprite_profiles) else None,
                     )
                     fallback_candidates.append(candidates)
                     if candidates:
@@ -1892,14 +1926,18 @@ class TencentCaptchaProvider(CaptchaProvider):
                     else:
                         logger_adapter.info(f"--> [全图匹配] 图案 {j + 1} 未找到候选坐标")
 
-                final_click_positions, fallback_total_score = self._select_best_candidate_combo(
+                selected_candidates, fallback_total_score = self._select_best_candidate_combo(
                     fallback_candidates,
                     min_distance=24,
                 )
+                final_click_positions = [candidate["pos"] for candidate in selected_candidates]
                 
                 # Canny 响应度如果在 0.15 以下，说明可能图太花导致边缘都消失
-                if fallback_total_score < 0.15 or len(final_click_positions) < 3:
-                    logger_adapter.error(f"全图匹配响应度过低 ({fallback_total_score:.2f})，放弃提交并刷新")
+                MIN_FALLBACK_TOTAL_SCORE = 0.75
+                if fallback_total_score < MIN_FALLBACK_TOTAL_SCORE or len(final_click_positions) < 3:
+                    logger_adapter.error(
+                        f"全图匹配响应度过低 ({fallback_total_score:.2f} < {MIN_FALLBACK_TOTAL_SCORE:.2f})，放弃提交并刷新"
+                    )
                     self._save_captcha_debug_bundle(
                         logger_adapter,
                         stage="fallback_low_score",
@@ -2014,6 +2052,201 @@ class TencentCaptchaProvider(CaptchaProvider):
 
         return math.dist(point_a, point_b)
 
+    def _compute_binary_shape_score_images(self, sprite_img, spec_img):
+        """针对数字/简单符号补一层二值形状匹配，避免 SIFT 对低纹理目标直接给 0 分"""
+        import cv2
+        import numpy as np
+
+        if sprite_img is None or spec_img is None:
+            return 0.0
+
+        if len(sprite_img.shape) == 3:
+            sprite_img = cv2.cvtColor(sprite_img, cv2.COLOR_BGR2GRAY)
+        if len(spec_img.shape) == 3:
+            spec_img = cv2.cvtColor(spec_img, cv2.COLOR_BGR2GRAY)
+
+        def normalize_mask(img):
+            blurred = cv2.GaussianBlur(img, (3, 3), 0)
+            _, binary = cv2.threshold(
+                blurred,
+                0,
+                255,
+                cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+            )
+            coords = cv2.findNonZero(binary)
+            if coords is None:
+                return None
+
+            x, y, w, h = cv2.boundingRect(coords)
+            crop = binary[y:y + h, x:x + w]
+            if crop.size == 0:
+                return None
+
+            canvas_size = 64
+            usable_size = canvas_size - 8
+            scale = min(usable_size / max(w, 1), usable_size / max(h, 1))
+            resized_w = max(1, int(round(w * scale)))
+            resized_h = max(1, int(round(h * scale)))
+            resized = cv2.resize(crop, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
+
+            canvas = np.zeros((canvas_size, canvas_size), dtype=np.uint8)
+            offset_x = (canvas_size - resized_w) // 2
+            offset_y = (canvas_size - resized_h) // 2
+            canvas[offset_y:offset_y + resized_h, offset_x:offset_x + resized_w] = resized
+            return canvas
+
+        sprite_mask = normalize_mask(sprite_img)
+        spec_mask = normalize_mask(spec_img)
+        if sprite_mask is None or spec_mask is None:
+            return 0.0
+
+        intersection = np.logical_and(sprite_mask > 0, spec_mask > 0).sum()
+        union = np.logical_or(sprite_mask > 0, spec_mask > 0).sum()
+        iou_score = intersection / union if union else 0.0
+
+        contours_1, _ = cv2.findContours(sprite_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours_2, _ = cv2.findContours(spec_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contour_score = 0.0
+        if contours_1 and contours_2:
+            c1 = max(contours_1, key=cv2.contourArea)
+            c2 = max(contours_2, key=cv2.contourArea)
+            try:
+                shape_distance = cv2.matchShapes(c1, c2, cv2.CONTOURS_MATCH_I1, 0.0)
+                contour_score = 1.0 / (1.0 + shape_distance * 8.0)
+            except Exception:
+                contour_score = 0.0
+
+        return max(iou_score, contour_score, (iou_score + contour_score) / 2.0)
+
+    def _compute_binary_shape_score(self, sprite_path, spec_path):
+        import cv2
+
+        sprite_img = cv2.imread(sprite_path, cv2.IMREAD_GRAYSCALE)
+        spec_img = cv2.imread(spec_path, cv2.IMREAD_GRAYSCALE)
+        return self._compute_binary_shape_score_images(sprite_img, spec_img)
+
+    def _normalize_ocr_char(self, text):
+        text = text.strip() if text else ""
+        if len(text) != 1:
+            return ""
+
+        ch = text[0]
+        if ch.isdigit() or ('A' <= ch <= 'Z') or ('a' <= ch <= 'z'):
+            return ch
+        if '\u4e00' <= ch <= '\u9fff':
+            return ch
+        return ""
+
+    def _classify_glyph_char(self, image, ocr):
+        import cv2
+
+        if image is None:
+            return "", {}
+
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image.copy()
+
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        _, binary = cv2.threshold(
+            blurred,
+            0,
+            255,
+            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+        )
+
+        variants = {
+            "orig": gray,
+            "th": binary,
+            "inv": 255 - binary,
+            "th_up2": cv2.resize(binary, None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST),
+            "inv_up2": cv2.resize(255 - binary, None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST),
+        }
+
+        variant_texts = {}
+        try:
+            with _inference_lock:
+                for name, variant in variants.items():
+                    success, encoded = cv2.imencode('.png', variant)
+                    if not success:
+                        variant_texts[name] = ""
+                        continue
+                    variant_texts[name] = (ocr.classification(encoded.tobytes()) or "").strip()
+        except Exception:
+            return "", {}
+
+        orig_char = self._normalize_ocr_char(variant_texts.get("orig"))
+        th_char = self._normalize_ocr_char(variant_texts.get("th"))
+        inv_char = self._normalize_ocr_char(variant_texts.get("inv"))
+        th_up_char = self._normalize_ocr_char(variant_texts.get("th_up2"))
+        inv_up_char = self._normalize_ocr_char(variant_texts.get("inv_up2"))
+
+        if th_char and th_char == inv_char and th_char == th_up_char:
+            return th_char, variant_texts
+        if th_char and th_char == inv_char and th_char == inv_up_char:
+            return th_char, variant_texts
+        if orig_char and th_char and orig_char == th_char:
+            return orig_char, variant_texts
+        if orig_char and inv_char and orig_char == inv_char:
+            return orig_char, variant_texts
+
+        return "", variant_texts
+
+    def _is_likely_glyph_text(self, text):
+        return bool(self._normalize_ocr_char(text))
+
+    def _build_sprite_profile(self, sprite_path, ocr):
+        import cv2
+
+        sprite_text = ""
+        raw_texts = {}
+        try:
+            sprite_img = cv2.imread(sprite_path)
+            sprite_text, raw_texts = self._classify_glyph_char(sprite_img, ocr)
+        except Exception:
+            sprite_text = ""
+            raw_texts = {}
+
+        return {
+            "ocr_text": sprite_text,
+            "is_glyph": bool(sprite_text),
+            "raw_ocr": raw_texts,
+        }
+
+    def _extract_binary_mask(self, image, crop_foreground=False, padding=2):
+        import cv2
+        import numpy as np
+
+        if image is None:
+            return None
+
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
+
+        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        _, binary = cv2.threshold(
+            blurred,
+            0,
+            255,
+            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+        )
+
+        if crop_foreground:
+            coords = cv2.findNonZero(binary)
+            if coords is None:
+                return None
+            x, y, w, h = cv2.boundingRect(coords)
+            x = max(0, x - padding)
+            y = max(0, y - padding)
+            w = min(binary.shape[1] - x, w + padding * 2)
+            h = min(binary.shape[0] - y, h + padding * 2)
+            binary = binary[y:y + h, x:x + w]
+
+        return binary if binary.size > 0 else None
+
     def _make_safe_name(self, raw_name):
         import re
 
@@ -2060,8 +2293,187 @@ class TencentCaptchaProvider(CaptchaProvider):
 
         logger_adapter.info(f"已保存验证码调试样本到 {bundle_dir}")
 
-    def _find_template_candidates(self, sprite_path, captcha_path, search_box=None, top_k=5, min_distance=24, padding=0):
-        """返回模板匹配候选点，用于局部精修和全图降级搜索"""
+    def _dedupe_candidates(self, candidates, min_distance=24, top_k=5):
+        deduped_candidates = []
+        for candidate in sorted(candidates, key=lambda item: item["score"], reverse=True):
+            if any(
+                self._distance(candidate["coords"], existing["coords"]) < min_distance
+                for existing in deduped_candidates
+            ):
+                continue
+            deduped_candidates.append(candidate)
+            if len(deduped_candidates) >= top_k:
+                break
+        return deduped_candidates
+
+    def _find_glyph_candidates(self, sprite_path, captcha_path, search_box=None, top_k=5, min_distance=24, padding=0):
+        import cv2
+
+        sprite_img = cv2.imread(sprite_path)
+        captcha_img = cv2.imread(captcha_path)
+        if sprite_img is None or captcha_img is None:
+            return []
+
+        sprite_mask = self._extract_binary_mask(sprite_img, crop_foreground=True, padding=2)
+        if sprite_mask is None:
+            return []
+
+        origin_x, origin_y = 0, 0
+        if search_box is not None:
+            x1, y1, x2, y2 = search_box
+            x1 = max(0, x1 - padding)
+            y1 = max(0, y1 - padding)
+            x2 = min(captcha_img.shape[1], x2 + padding)
+            y2 = min(captcha_img.shape[0], y2 + padding)
+            captcha_view = captcha_img[y1:y2, x1:x2]
+            origin_x, origin_y = x1, y1
+        else:
+            captcha_view = captcha_img
+
+        captcha_mask = self._extract_binary_mask(captcha_view, crop_foreground=False, padding=0)
+        if captcha_mask is None:
+            return []
+
+        if (
+            captcha_mask.shape[0] < sprite_mask.shape[0]
+            or captcha_mask.shape[1] < sprite_mask.shape[1]
+        ):
+            return []
+
+        candidates = []
+        h_s, w_s = sprite_mask.shape
+        for angle in [-12, 0, 12]:
+            if angle != 0:
+                matrix = cv2.getRotationMatrix2D((w_s // 2, h_s // 2), angle, 1.0)
+                rotated_mask = cv2.warpAffine(
+                    sprite_mask,
+                    matrix,
+                    (w_s, h_s),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=0,
+                )
+            else:
+                rotated_mask = sprite_mask
+
+            if (
+                captcha_mask.shape[0] < rotated_mask.shape[0]
+                or captcha_mask.shape[1] < rotated_mask.shape[1]
+            ):
+                continue
+
+            res = cv2.matchTemplate(captcha_mask, rotated_mask, cv2.TM_CCOEFF_NORMED)
+            res_work = res.copy()
+            for _ in range(top_k):
+                _, max_val, _, max_loc = cv2.minMaxLoc(res_work)
+                if max_val <= 0:
+                    break
+
+                center_x = origin_x + max_loc[0] + rotated_mask.shape[1] // 2
+                center_y = origin_y + max_loc[1] + rotated_mask.shape[0] // 2
+                candidates.append({
+                    "pos": f"{center_x},{center_y}",
+                    "coords": (center_x, center_y),
+                    "score": float(max_val),
+                    "angle": angle,
+                })
+
+                left = max(0, max_loc[0] - min_distance)
+                top = max(0, max_loc[1] - min_distance)
+                right = min(res_work.shape[1], max_loc[0] + rotated_mask.shape[1] + min_distance)
+                bottom = min(res_work.shape[0], max_loc[1] + rotated_mask.shape[0] + min_distance)
+                res_work[top:bottom, left:right] = -1.0
+
+        return self._dedupe_candidates(candidates, min_distance=min_distance, top_k=top_k)
+
+    def _find_component_candidates(self, sprite_path, captcha_path, search_box=None, top_k=5, min_distance=24, padding=0, target_profile=None):
+        import cv2
+
+        ocr, _ = get_shared_ocr_models()
+        sprite_img = cv2.imread(sprite_path)
+        captcha_img = cv2.imread(captcha_path)
+        if sprite_img is None or captcha_img is None:
+            return []
+
+        gray_sprite = cv2.cvtColor(sprite_img, cv2.COLOR_BGR2GRAY)
+        _, sprite_binary = cv2.threshold(gray_sprite, 240, 255, cv2.THRESH_BINARY_INV)
+        sprite_coords = cv2.findNonZero(sprite_binary)
+        if sprite_coords is not None:
+            _, _, sprite_w, sprite_h = cv2.boundingRect(sprite_coords)
+        else:
+            sprite_h, sprite_w = sprite_img.shape[:2]
+
+        origin_x, origin_y = 0, 0
+        if search_box is not None:
+            x1, y1, x2, y2 = search_box
+            x1 = max(0, x1 - padding)
+            y1 = max(0, y1 - padding)
+            x2 = min(captcha_img.shape[1], x2 + padding)
+            y2 = min(captcha_img.shape[0], y2 + padding)
+            captcha_view = captcha_img[y1:y2, x1:x2]
+            origin_x, origin_y = x1, y1
+        else:
+            captcha_view = captcha_img
+
+        if captcha_view.size == 0:
+            return []
+
+        gray_view = cv2.cvtColor(captcha_view, cv2.COLOR_BGR2GRAY)
+        _, dark_mask = cv2.threshold(gray_view, 96, 255, cv2.THRESH_BINARY_INV)
+        dark_mask = cv2.medianBlur(dark_mask, 3)
+
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(dark_mask, 8)
+        bbox_area = max(1, sprite_w * sprite_h)
+        min_bbox_area = max(180, int(bbox_area * 0.2))
+        max_bbox_area = max(min_bbox_area + 1, int(bbox_area * 6.0))
+        crop_padding = 4 if search_box is None else 2
+
+        candidates = []
+        for i in range(1, num_labels):
+            x, y, w, h, area = stats[i]
+            current_bbox_area = w * h
+            if area < 80 or w < 18 or h < 18:
+                continue
+            if current_bbox_area < min_bbox_area or current_bbox_area > max_bbox_area:
+                continue
+
+            left = max(0, x - crop_padding)
+            top = max(0, y - crop_padding)
+            right = min(captcha_view.shape[1], x + w + crop_padding)
+            bottom = min(captcha_view.shape[0], y + h + crop_padding)
+            component_crop = captcha_view[top:bottom, left:right]
+            if component_crop.size == 0:
+                continue
+
+            score, is_semantic = self._compute_score_from_images(
+                sprite_img,
+                component_crop,
+                ocr,
+                sprite_profile=target_profile,
+            )
+            if score <= 0:
+                continue
+
+            width_similarity = min(w, sprite_w) / max(w, sprite_w)
+            height_similarity = min(h, sprite_h) / max(h, sprite_h)
+            area_similarity = min(current_bbox_area, bbox_area) / max(current_bbox_area, bbox_area)
+            if not is_semantic:
+                size_factor = max(0.35, 0.6 * ((width_similarity + height_similarity) / 2.0) + 0.4 * area_similarity)
+                score *= size_factor
+
+            center_x = origin_x + x + w // 2
+            center_y = origin_y + y + h // 2
+            candidates.append({
+                "pos": f"{center_x},{center_y}",
+                "coords": (center_x, center_y),
+                "score": float(score),
+                "source": "component",
+                "semantic": is_semantic,
+            })
+
+        return self._dedupe_candidates(candidates, min_distance=min_distance, top_k=top_k)
+
+    def _find_edge_template_candidates(self, sprite_path, captcha_path, search_box=None, top_k=5, min_distance=24, padding=0):
         import cv2
         import numpy as np
         
@@ -2154,20 +2566,46 @@ class TencentCaptchaProvider(CaptchaProvider):
                 bottom = min(res_work.shape[0], max_loc[1] + rotated_canny.shape[0] + min_distance)
                 res_work[top:bottom, left:right] = -1.0
 
-        deduped_candidates = []
-        for candidate in sorted(candidates, key=lambda item: item["score"], reverse=True):
-            if any(
-                self._distance(candidate["coords"], existing["coords"]) < min_distance
-                for existing in deduped_candidates
-            ):
-                continue
-            deduped_candidates.append(candidate)
-            if len(deduped_candidates) >= top_k:
-                break
+        return self._dedupe_candidates(candidates, min_distance=min_distance, top_k=top_k)
 
-        return deduped_candidates
+    def _find_template_candidates(self, sprite_path, captcha_path, search_box=None, top_k=5, min_distance=24, padding=0, target_profile=None):
+        """返回模板匹配候选点，用于局部精修和全图降级搜索"""
+        candidates = self._find_component_candidates(
+            sprite_path,
+            captcha_path,
+            search_box=search_box,
+            top_k=top_k,
+            min_distance=min_distance,
+            padding=padding,
+            target_profile=target_profile,
+        )
 
-    def _find_sprite_by_template(self, sprite_path, captcha_path, search_box=None, padding=0):
+        if target_profile and target_profile.get("is_glyph"):
+            candidates.extend(
+                self._find_glyph_candidates(
+                    sprite_path,
+                    captcha_path,
+                    search_box=search_box,
+                    top_k=top_k,
+                    min_distance=min_distance,
+                    padding=padding,
+                )
+            )
+        else:
+            candidates.extend(
+                self._find_edge_template_candidates(
+                    sprite_path,
+                    captcha_path,
+                    search_box=search_box,
+                    top_k=top_k,
+                    min_distance=min_distance,
+                    padding=padding,
+                )
+            )
+
+        return self._dedupe_candidates(candidates, min_distance=min_distance, top_k=top_k)
+
+    def _find_sprite_by_template(self, sprite_path, captcha_path, search_box=None, padding=0, target_profile=None):
         """当目标检测由于背景干扰失败时，采用 Canny 边缘及多角度模板匹配进行搜索"""
         candidates = self._find_template_candidates(
             sprite_path,
@@ -2176,6 +2614,7 @@ class TencentCaptchaProvider(CaptchaProvider):
             top_k=1,
             min_distance=24,
             padding=padding,
+            target_profile=target_profile,
         )
         if not candidates:
             return None, 0.0
@@ -2211,38 +2650,55 @@ class TencentCaptchaProvider(CaptchaProvider):
         if best_combo is None:
             return [], 0.0
 
-        return [candidate["pos"] for candidate in best_combo], best_total_score
+        return list(best_combo), best_total_score
 
-    def _compute_score(self, sprite_path, spec_path, ocr):
+    def _compute_score_from_images(self, sprite_img, spec_img, ocr, sprite_profile=None):
         """混合评分器：OCR 语义相似度 + SIFT 几何一致性内点评分"""
         import cv2
         import numpy as np
         
+        shape_score = self._compute_binary_shape_score_images(sprite_img, spec_img)
+        sprite_char = ""
+        if sprite_profile:
+            sprite_char = (sprite_profile.get("ocr_text") or "").strip()
+        is_glyph_target = sprite_profile.get("is_glyph", False) if sprite_profile else False
+        spec_char = ""
+        
         # 1. OCR 语义比对 (最高优先级，用于解决汉字和数字)
         try:
-            with open(sprite_path, "rb") as f:
-                sprite_bytes = f.read()
-            with open(spec_path, "rb") as f:
-                spec_bytes = f.read()
-                
-            with _inference_lock:
-                sprite_char = ocr.classification(sprite_bytes)
-                spec_char = ocr.classification(spec_bytes)
-                
-            # 去除空字符串及无效符
-            sprite_char = sprite_char.strip() if sprite_char else ""
-            spec_char = spec_char.strip() if spec_char else ""
+            if not sprite_char:
+                sprite_char, _ = self._classify_glyph_char(sprite_img, ocr)
+                is_glyph_target = bool(sprite_char)
+            if is_glyph_target:
+                spec_char, _ = self._classify_glyph_char(spec_img, ocr)
             
-            # 如果都不为空且一致（排除单调标识符0/1），直接赋予极大权重
-            if len(sprite_char) > 0 and len(spec_char) > 0:
-                if sprite_char == spec_char and sprite_char not in ["0", "1"]:
-                    return 100.0, True
+            if is_glyph_target:
+                if len(sprite_char) > 0 and len(spec_char) > 0 and sprite_char == spec_char:
+                    threshold = 0.45 if sprite_char in ["0", "1"] else 0.35
+                    if shape_score >= threshold:
+                        return 75.0 + shape_score * 25.0, True
+                    return 60.0 + shape_score * 10.0, True
         except Exception:
             pass
 
+        # 1.5 字形目标优先依赖形状，不再强行交给 SIFT
+        if is_glyph_target:
+            if shape_score >= 0.75:
+                return shape_score * 28.0, False
+            if shape_score >= 0.55:
+                return shape_score * 16.0, False
+            return shape_score * 4.0, False
+
+        # 非字形目标的纯形状兜底，避免极少特征点时全盘 0 分
+        if shape_score >= 0.55:
+            return shape_score * 20.0, False
+
         # 2. SIFT + RANSAC 单应性几何校验 (用于解决无规则图形和图标)
-        img1 = cv2.imread(sprite_path, cv2.IMREAD_GRAYSCALE)
-        img2 = cv2.imread(spec_path, cv2.IMREAD_GRAYSCALE)
+        if sprite_img is None or spec_img is None:
+            return 0.0, False
+
+        img1 = cv2.cvtColor(sprite_img, cv2.COLOR_BGR2GRAY) if len(sprite_img.shape) == 3 else sprite_img
+        img2 = cv2.cvtColor(spec_img, cv2.COLOR_BGR2GRAY) if len(spec_img.shape) == 3 else spec_img
         
         if img1 is None or img2 is None:
             return 0.0, False
@@ -2281,9 +2737,16 @@ class TencentCaptchaProvider(CaptchaProvider):
                 
         # 低保得分（如果只有可怜的特征点，且无法构成面）。避免遇到极少特征点的时候全盘 0 分。
         if len(des1) > 0:
-            return len(good) / len(des1), False
+            return max(len(good) / len(des1), shape_score * 8.0), False
             
-        return 0.0, False
+        return shape_score * 5.0, False
+
+    def _compute_score(self, sprite_path, spec_path, ocr, sprite_profile=None):
+        import cv2
+
+        sprite_img = cv2.imread(sprite_path)
+        spec_img = cv2.imread(spec_path)
+        return self._compute_score_from_images(sprite_img, spec_img, ocr, sprite_profile=sprite_profile)
 
 
 class CaptchaFactory:

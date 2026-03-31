@@ -1778,35 +1778,43 @@ class TencentCaptchaProvider(CaptchaProvider):
             wait = WebDriverWait(driver, timeout)
             self._download_captcha_img(driver, timeout, logger_adapter)
             
-            # 检查验证码质量（使用推理锁）
-            is_captcha_valid = False
+            logger_adapter.info("开始处理验证码图片并识别")
+            
+            # 分割待选图块（sprite.jpg）
+            import cv2
+            import numpy as np
+            raw_sprite = cv2.imread("temp/sprite.jpg")
+            if raw_sprite is not None:
+                w_raw = raw_sprite.shape[1]
+                for i in range(3):
+                    temp = raw_sprite[:, w_raw // 3 * i: w_raw // 3 * (i + 1)]
+                    cv2.imwrite(f"temp/sprite_{i + 1}.jpg", temp)
+            
+            captcha = cv2.imread("temp/captcha.jpg")
+            with open("temp/captcha.jpg", 'rb') as f:
+                captcha_b = f.read()
+            
+            # 目标检测（使用推理锁）
             with _inference_lock:
-                is_captcha_valid = self._check_captcha(ocr)
+                bboxes = det.detection(captcha_b)
+            
+            # 提取候选框图片和坐标信息
+            spec_infos = []
+            for i in range(len(bboxes)):
+                x1, y1, x2, y2 = bboxes[i]
+                spec = captcha[y1:y2, x1:x2]
+                spec_path = f"temp/spec_{i + 1}.jpg"
+                cv2.imwrite(spec_path, spec)
+                pos = f"{int((x1 + x2) / 2)},{int((y1 + y2) / 2)}"
+                spec_infos.append({"path": spec_path, "pos": pos, "index": i})
                 
-            if is_captcha_valid:
-                logger_adapter.info("开始识别验证码")
-                captcha = cv2.imread("temp/captcha.jpg")
-                with open("temp/captcha.jpg", 'rb') as f:
-                    captcha_b = f.read()
-                
-                # 目标检测（使用推理锁）
-                with _inference_lock:
-                    bboxes = det.detection(captcha_b)
-                
-                # 提取候选框图片和坐标信息
-                spec_infos = []
-                for i in range(len(bboxes)):
-                    x1, y1, x2, y2 = bboxes[i]
-                    spec = captcha[y1:y2, x1:x2]
-                    spec_path = f"temp/spec_{i + 1}.jpg"
-                    cv2.imwrite(spec_path, spec)
-                    pos = f"{int((x1 + x2) / 2)},{int((y1 + y2) / 2)}"
-                    spec_infos.append({"path": spec_path, "pos": pos, "index": i})
-                    
-                # 构建 3 x N 评分矩阵
-                score_matrix = []
+            # --- 阶段 1: 基于目标检测 + OCR/SIFT 的全局分配 ---
+            best_assignment = None
+            best_total_score = -1.0
+            
+            if len(spec_infos) >= 3:
                 import itertools
-                
+                score_matrix = []
                 for j in range(3):
                     sprite_path = f"temp/sprite_{j + 1}.jpg"
                     sprite_scores = []
@@ -1816,62 +1824,75 @@ class TencentCaptchaProvider(CaptchaProvider):
                         logger_adapter.debug(f"目标 {j + 1} -> 候选 {k + 1}: 得分 {score:.2f} (语义匹配: {is_semantic})")
                     score_matrix.append(sprite_scores)
                 
-                # 基于排列组合寻找全局最优唯一分配
-                best_assignment = None
-                best_total_score = -1.0
                 all_spec_indices = list(range(len(spec_infos)))
-                
-                if len(spec_infos) >= 3:
-                    for perm in itertools.permutations(all_spec_indices, 3):
-                        total_score = score_matrix[0][perm[0]] + score_matrix[1][perm[1]] + score_matrix[2][perm[2]]
-                        if total_score > best_total_score:
-                            best_total_score = total_score
-                            best_assignment = perm
-                
-                # 判断是否有分配结果以及总分是否过度悲观 (底线设为最低每图得分为类似0.25随机分或有1个Inlier)
-                # 因为加入了 OCR (100分)，如果是纯文字肯定过300分。如果是图形，起码总和该有个 4~5 (几个内点)。
-                # 不符合底线则说明由于各种原因没认出来。
-                MIN_ACCEPTABLE_TOTAL_SCORE = 2.0
-                
-                if best_assignment is not None and best_total_score >= MIN_ACCEPTABLE_TOTAL_SCORE:
-                    logger_adapter.info(f"成功找到全局最优组合，验证码总置信分: {best_total_score:.2f}")
-                    for j in range(3):
-                        spec_idx = best_assignment[j]
-                        positon = spec_infos[spec_idx]["pos"]
-                        score = score_matrix[j][spec_idx]
-                        logger_adapter.info(f"--> 图案 {j + 1} 选择候选框 {spec_idx + 1} 位于 ({positon})，单项得分：{score:.2f}")
-                        
-                        slideBg = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="slideBg"]')))
-                        style = slideBg.get_attribute("style")
-                        x, y = int(positon.split(",")[0]), int(positon.split(",")[1])
-                        width_raw, height_raw = captcha.shape[1], captcha.shape[0]
-                        width, height = float(get_width_from_style(style)), float(get_height_from_style(style))
-                        x_offset, y_offset = float(-width / 2), float(-height / 2)
-                        final_x, final_y = int(x_offset + x / width_raw * width), int(y_offset + y / height_raw * height)
-                        ActionChains(driver).move_to_element_with_offset(slideBg, final_x, final_y).click().perform()
-                        time.sleep(0.3)
-                        
-                    confirm = wait.until(EC.element_to_be_clickable((By.XPATH, '//*[@id="tcStatus"]/div[2]/div[2]/div/div')))
-                    logger_adapter.info("提交验证码")
-                    time.sleep(0.5)
-                    confirm.click()
-                    time.sleep(3)
-                    
-                    # 检查是否通过
-                    result_elem = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="tcOperation"]')))
-                    if result_elem.get_attribute("class") == 'tc-opera pointer show-success':
-                        logger_adapter.info("验证码通过 🎉")
-                        return
-                    else:
-                        logger_adapter.error(f"验证码提交后未通过，图形可能过于相近导致混淆。")
-                        retry_stats['count'] += 1
-                else:
-                    score_info = f"{best_total_score:.2f}" if best_assignment is not None else "候选框不足3个"
-                    logger_adapter.error(f"当前图片置信度极低（总分 {score_info} < {MIN_ACCEPTABLE_TOTAL_SCORE}），避免瞎猜，提早刷新换图")
-                    retry_stats['count'] += 1
-                    
+                for perm in itertools.permutations(all_spec_indices, 3):
+                    total_score = score_matrix[0][perm[0]] + score_matrix[1][perm[1]] + score_matrix[2][perm[2]]
+                    if total_score > best_total_score:
+                        best_total_score = total_score
+                        best_assignment = perm
+            
+            MIN_ACCEPTABLE_TOTAL_SCORE = 2.0
+            final_click_positions = []
+            use_fallback = False
+            
+            if best_assignment is not None and best_total_score >= MIN_ACCEPTABLE_TOTAL_SCORE:
+                logger_adapter.info(f"成功找到全局最优组合，验证码一阶段置信分: {best_total_score:.2f}")
+                for j in range(3):
+                    spec_idx = best_assignment[j]
+                    positon = spec_infos[spec_idx]["pos"]
+                    score = score_matrix[j][spec_idx]
+                    logger_adapter.info(f"--> 图案 {j + 1} 选择候选框 {spec_idx + 1} 位于 ({positon})，单项得分：{score:.2f}")
+                    final_click_positions.append(positon)
             else:
-                logger_adapter.error("当前验证码大图质量低，可能无法安全识别，刷新")
+                score_info = f"{best_total_score:.2f}" if best_assignment is not None else "候选框不足3个"
+                logger_adapter.warning(f"局部目标检测不佳（得分 {score_info} < {MIN_ACCEPTABLE_TOTAL_SCORE}），降级使用全图边缘模板匹配...")
+                use_fallback = True
+                
+            # --- 阶段 2: 全图边缘模板匹配搜索 ---
+            if use_fallback:
+                final_click_positions = []
+                fallback_total_score = 0.0
+                for j in range(3):
+                    sprite_path = f"temp/sprite_{j + 1}.jpg"
+                    pos, score = self._find_sprite_by_template(sprite_path, "temp/captcha.jpg")
+                    fallback_total_score += score
+                    logger_adapter.info(f"--> [全图匹配] 图案 {j + 1} 匹配坐标 ({pos})，边缘响应分：{score:.2f}")
+                    if pos:
+                        final_click_positions.append(pos)
+                
+                # Canny 响应度如果在 0.15 以下，说明可能图太花导致边缘都消失
+                if fallback_total_score < 0.15 or len(final_click_positions) < 3:
+                    logger_adapter.error(f"全图匹配响应度过低 ({fallback_total_score:.2f})，放弃提交并刷新")
+                    final_click_positions = []  # 触发失败换图逻辑
+            
+            # --- 执行点击动作 ---
+            if len(final_click_positions) == 3:
+                for positon in final_click_positions:
+                    slideBg = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="slideBg"]')))
+                    style = slideBg.get_attribute("style")
+                    x, y = int(positon.split(",")[0]), int(positon.split(",")[1])
+                    width_raw, height_raw = captcha.shape[1], captcha.shape[0]
+                    width, height = float(get_width_from_style(style)), float(get_height_from_style(style))
+                    x_offset, y_offset = float(-width / 2), float(-height / 2)
+                    final_x, final_y = int(x_offset + x / width_raw * width), int(y_offset + y / height_raw * height)
+                    ActionChains(driver).move_to_element_with_offset(slideBg, final_x, final_y).click().perform()
+                    time.sleep(0.3)
+                    
+                confirm = wait.until(EC.element_to_be_clickable((By.XPATH, '//*[@id="tcStatus"]/div[2]/div[2]/div/div')))
+                logger_adapter.info("提交验证码")
+                time.sleep(0.5)
+                confirm.click()
+                time.sleep(3)
+                
+                # 检查是否通过
+                result_elem = wait.until(EC.visibility_of_element_located((By.XPATH, '//*[@id="tcOperation"]')))
+                if result_elem.get_attribute("class") == 'tc-opera pointer show-success':
+                    logger_adapter.info("验证码通过 🎉")
+                    return
+                else:
+                    logger_adapter.error(f"验证码提交后未通过，匹配坐标可能存在偏移。")
+                    retry_stats['count'] += 1
+            else:
                 retry_stats['count'] += 1
             
             # 执行提早换图逻辑
@@ -1932,20 +1953,60 @@ class TencentCaptchaProvider(CaptchaProvider):
         logger_adapter.info("开始下载验证码图片(2): " + img2_url)
         download_image(img2_url, "sprite.jpg", user_agent=current_ua)
 
-    def _check_captcha(self, ocr) -> bool:
-        """检查验证码图片质量（延迟导入cv2）"""
+    def _find_sprite_by_template(self, sprite_path, captcha_path):
+        """当目标检测由于背景干扰失败时，采用 Canny 边缘及多角度模板匹配进行全图搜索"""
         import cv2
+        import numpy as np
         
-        raw = cv2.imread("temp/sprite.jpg")
-        for i in range(3):
-            w = raw.shape[1]
-            temp = raw[:, w // 3 * i: w // 3 * (i + 1)]
-            cv2.imwrite(f"temp/sprite_{i + 1}.jpg", temp)
-            with open(f"temp/sprite_{i + 1}.jpg", mode="rb") as f:
-                temp_rb = f.read()
-            if ocr.classification(temp_rb) in ["0", "1"]:
-                return False
-        return True
+        sprite_img = cv2.imread(sprite_path)
+        captcha_img = cv2.imread(captcha_path)
+        if sprite_img is None or captcha_img is None:
+            return None, 0.0
+            
+        # 1. 动态过滤白底（提取真实图标部分）
+        gray_sprite = cv2.cvtColor(sprite_img, cv2.COLOR_BGR2GRAY)
+        # 腾讯图块白底通常很亮，提取非白色的前景部分
+        _, binary = cv2.threshold(gray_sprite, 240, 255, cv2.THRESH_BINARY_INV)
+        coords = cv2.findNonZero(binary)
+        if coords is not None:
+            x, y, w, h = cv2.boundingRect(coords)
+            x = max(0, x - 2)
+            y = max(0, y - 2)
+            w = min(sprite_img.shape[1] - x, w + 4)
+            h = min(sprite_img.shape[0] - y, h + 4)
+            sprite_icon = sprite_img[y:y+h, x:x+w]
+        else:
+            sprite_icon = sprite_img
+            
+        sprite_gray = cv2.cvtColor(sprite_icon, cv2.COLOR_BGR2GRAY)
+        captcha_gray = cv2.cvtColor(captcha_img, cv2.COLOR_BGR2GRAY)
+        
+        # 2. 提取 Canny 轮廓
+        sprite_canny = cv2.Canny(sprite_gray, 50, 150)
+        captcha_canny = cv2.Canny(captcha_gray, 50, 150)
+        
+        h_s, w_s = sprite_canny.shape
+        best_score = -1.0
+        best_loc = (0, 0)
+        
+        # 3. 施加多重微弱旋转抵御歪斜
+        for angle in [-15, 0, 15]:
+            if angle != 0:
+                M = cv2.getRotationMatrix2D((w_s//2, h_s//2), angle, 1.0)
+                rotated_canny = cv2.warpAffine(sprite_canny, M, (w_s, h_s), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            else:
+                rotated_canny = sprite_canny
+                
+            res = cv2.matchTemplate(captcha_canny, rotated_canny, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(res)
+            
+            if max_val > best_score:
+                best_score = max_val
+                best_loc = max_loc
+                
+        center_x = best_loc[0] + w_s // 2
+        center_y = best_loc[1] + h_s // 2
+        return f"{center_x},{center_y}", best_score
 
     def _compute_score(self, sprite_path, spec_path, ocr):
         """混合评分器：OCR 语义相似度 + SIFT 几何一致性内点评分"""

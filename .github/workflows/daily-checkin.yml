@@ -97,5 +97,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: checkin-logs-${{ github.run_number }}
-          path: logs/
-          retention-days: 7
+          path: |
+            logs/
+            temp/screenshots/
+          retention-days: 5
